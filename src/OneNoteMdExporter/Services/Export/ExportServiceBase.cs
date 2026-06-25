@@ -30,6 +30,12 @@ namespace alxnbl.OneNoteMdExporter.Services.Export
         /// </summary>
         protected IncrementalManifest Manifest { get; private set; }
 
+        /// <summary>
+        /// Running count of broken image references (md image whose target file is missing on disk)
+        /// found across the notebook currently being exported. Reset at the start of each notebook.
+        /// </summary>
+        protected int BrokenImagesInNotebook { get; set; } = 0;
+
         protected static string GetNotebookFolderPath(Notebook notebook)
             => Path.Combine(notebook.ExportFolder, notebook.GetNotebookPath());
 
@@ -56,6 +62,9 @@ namespace alxnbl.OneNoteMdExporter.Services.Export
 
         public NotebookExportResult ExportNotebook(Notebook notebook, string sectionNameFilter = "", string pageNameFilter = "")
         {
+            // Reset per-notebook diagnostics before starting a new export.
+            BrokenImagesInNotebook = 0;
+
             if (AppSettings.IncrementalExport)
             {
                 // Stable folder (no timestamp) so successive runs converge on the same output.
@@ -213,6 +222,10 @@ namespace alxnbl.OneNoteMdExporter.Services.Export
 
                 WritePageMdFile(page, pageMd);
 
+                // Fail-loudly: warn about any image whose target file is missing on disk, so silent
+                // image loss (a known OneNote-sync failure mode) becomes an observable signal.
+                VerifyPageImages(page, pageMd);
+
                 return true;
             }
             catch (Exception ex)
@@ -295,6 +308,90 @@ namespace alxnbl.OneNoteMdExporter.Services.Export
 
             Manifest.RecordPage(page, relativePath, success);
             Manifest.Save();
+        }
+
+        /// <summary>
+        /// Verify that every local image referenced by the exported page markdown actually exists on
+        /// disk, and WARN for each one that does not. Silent image loss is a known OneNote-sync failure
+        /// mode (see the project FAQ) - this turns it into an observable signal instead of a quietly
+        /// broken export. Each broken reference is logged and added to <see cref="BrokenImagesInNotebook"/>.
+        /// </summary>
+        /// <param name="page">The page whose markdown was just written.</param>
+        /// <param name="pageMd">The final markdown content written for the page.</param>
+        protected void VerifyPageImages(Page page, string pageMd)
+        {
+            var pageMdFilePath = GetPageMdFilePath(page);
+            foreach (var missingRef in FindBrokenImageReferences(pageMd, pageMdFilePath))
+            {
+                BrokenImagesInNotebook++;
+                Log.Warning($"Broken image in '{page.TitleWithNoInvalidChars(AppSettings.MdMaxFileLength)}': referenced file '{missingRef}' was not found on disk.");
+            }
+        }
+
+        /// <summary>
+        /// Pure helper: enumerate the local image references in <paramref name="pageMd"/> (both the
+        /// Markdown <c>![](path)</c> form and the raw HTML <c>&lt;img src="path"&gt;</c> form) whose
+        /// target file does not exist on disk. Remote references (http/https/data URIs) are ignored.
+        /// Resolution is done relative to the page's own md-file directory, matching what a Markdown
+        /// renderer actually resolves, so the check reflects real rendering breakage. No COM dependency.
+        /// </summary>
+        public static IEnumerable<string> FindBrokenImageReferences(string pageMd, string pageMdFilePath)
+        {
+            if (string.IsNullOrEmpty(pageMd))
+                yield break;
+
+            var baseDir = Path.GetDirectoryName(Path.GetFullPath(pageMdFilePath)) ?? string.Empty;
+
+            // ![alt](path)  and  <img ... src="path" ...>
+            var matches = Regex.Matches(
+                pageMd,
+                @"!\[[^\]]*\]\((?<mdpath>[^)\s]+)(?:\s+""[^""]*"")?\)|<img\b[^>]*?\bsrc\s*=\s*""(?<htmlpath>[^""]+)""[^>]*>",
+                RegexOptions.IgnoreCase);
+
+            var seen = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
+
+            foreach (Match m in matches)
+            {
+                var raw = m.Groups["mdpath"].Success ? m.Groups["mdpath"].Value : m.Groups["htmlpath"].Value;
+                if (string.IsNullOrWhiteSpace(raw))
+                    continue;
+
+                // Skip remote / inline references - we can only check local files.
+                if (Regex.IsMatch(raw, @"^(?:[a-z]+:)?//", RegexOptions.IgnoreCase) ||
+                    raw.StartsWith("data:", StringComparison.OrdinalIgnoreCase) ||
+                    raw.StartsWith("mailto:", StringComparison.OrdinalIgnoreCase))
+                    continue;
+
+                // Strip an optional URL fragment/anchor and decode percent-encoding from the path.
+                var relPath = raw.Split('#')[0];
+                relPath = WebUtility.UrlDecode(relPath);
+                if (string.IsNullOrWhiteSpace(relPath))
+                    continue;
+
+                string absPath = null;
+                bool unparseable = false;
+                try
+                {
+                    absPath = Path.IsPathRooted(relPath)
+                        ? Path.GetFullPath(relPath)
+                        : Path.GetFullPath(Path.Combine(baseDir, relPath));
+                }
+                catch
+                {
+                    // An unparseable path is, for our purposes, a broken reference.
+                    unparseable = true;
+                }
+
+                if (unparseable)
+                {
+                    if (seen.Add(raw))
+                        yield return raw;
+                    continue;
+                }
+
+                if (!File.Exists(absPath) && seen.Add(raw))
+                    yield return raw;
+            }
         }
 
         /// <summary>

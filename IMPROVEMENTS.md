@@ -1,6 +1,6 @@
 # OneNote-Md-Exporter — Incremental Export & Conversion-Quality Improvements
 
-This branch adds three improvements to `alxnbl/onenote-md-exporter`, all driven through
+This branch adds four improvements to `alxnbl/onenote-md-exporter`, all driven through
 the existing CLI with no change to the default behaviour:
 
 1. **Incremental export** (`--incremental`) — skip pages unchanged in OneNote since the
@@ -8,9 +8,13 @@ the existing CLI with no change to the default behaviour:
 2. **Cleaner image references** — stop emitting the opaque cache GUID as image alt text.
 3. **Complex-table rendering fix** — guarantee raw HTML tables are recognised as HTML
    blocks by strict GFM/CommonMark renderers (GitHub, Obsidian).
+4. **Broken-image self-check** — after writing each page, verify every local image
+   reference resolves to a file on disk, and surface a count + remediation hint instead of
+   letting silent image loss go unnoticed.
 
-All three are opt-in-safe: the default (no `--incremental`) export is unchanged except for
-the two rendering-quality fixes, which only make output cleaner.
+All four are opt-in-safe: the default (no `--incremental`) export is unchanged except for
+the rendering-quality fixes and the diagnostic warning, which only make output cleaner and
+loss more visible.
 
 ---
 
@@ -149,11 +153,58 @@ Trailing text.
 
 ---
 
+## 4. Broken-image self-check — make silent image loss observable
+
+### Problem
+OneNote images can fail to download during export (a known sync failure mode — the
+project's own FAQ admits "Some of my images are lost / broken during export"). When that
+happens the markdown still contains an `![](_resources/<guid>.png)` reference, but the
+target file is missing on disk. Nothing warns the user: the export reports success and the
+broken image is only discovered later, by eye, in a viewer.
+
+### What changed
+After each page's markdown is written, a new pass scans it for **local** image references
+(both `![](path)` and raw `<img src="path">` forms) and checks each target exists on disk.
+Every missing file is logged as a per-page warning naming the page and the path, and the
+misses are tallied. At the end of the notebook a summary warning reports the total and the
+fix:
+
+```
+Broken image in 'Q3 Planning': referenced file '_resources/8c1f….png' was not found on disk.
+...
+3 broken image reference(s) detected across the export - the referenced files are missing
+on disk. Try enabling 'Download all files and images' in OneNote sync options, then re-export.
+```
+
+The count is also exposed on `NotebookExportResult.BrokenImageCount` for callers/automation.
+
+This is **diagnostic only** — it never alters the exported markdown, and it does not change
+the page's success/failure status (a page with a broken image still exports). It simply
+turns a silent data-loss path into an observable signal (fail-loudly, not silently).
+
+### Design notes
+- **Local-only.** Remote (`http(s)://`, protocol-relative `//`), `data:` and `mailto:`
+  references are ignored — they aren't files this exporter is responsible for.
+- **Path-faithful.** The reference is `#`-fragment-stripped and percent-decoded before the
+  existence check, so `_resources/a%20b.png` correctly matches the file `a b.png`.
+- **De-duplicated.** The same broken path referenced twice on a page is reported once.
+- **Unparseable path = broken.** A reference that can't be resolved to a filesystem path is
+  treated as a broken reference rather than silently swallowed.
+
+### Files
+| File | Change |
+|---|---|
+| `Services/Export/ExportServiceBase.cs` | New `VerifyPageImages` + static `FindBrokenImageReferences`, called after `WritePageMdFile`; per-notebook `BrokenImagesInNotebook` counter (reset at the start of each notebook). |
+| `Services/Export/MdExportService.cs` | Assigns the count to the result and logs the end-of-export summary warning with a remediation hint. |
+| `Models/NotebookExportResult.cs` | New `BrokenImageCount` counter. |
+
+---
+
 ## Verification
 
 The full project requires desktop OneNote + Word via COM interop and builds only with
 .NET-Framework MSBuild, so it can't be compiled or end-to-end tested in a headless
-environment. The three changes above are, however, **pure string/data transforms with no
+environment. The four changes above are, however, **pure string/data transforms with no
 COM dependency**, so their logic was extracted into a standalone harness and unit-tested:
 
 - Incremental manifest: skip/record/persist/reload, sub-second-drift tolerance,
@@ -161,8 +212,11 @@ COM dependency**, so their logic was extracted into a standalone harness and uni
 - Image alt-text emission (table and non-table paths) — **3 assertions**.
 - HTML table normalization: blank-line insertion both sides, content/`colspan`/`rowspan`
   preservation, idempotency, no-op when no table — **6 assertions**.
+- Broken-image detection: present-vs-missing discrimination, remote/data ignored, raw
+  `<img src>` form checked, percent-decoding before existence check, de-duplication, no-op
+  when no images — **7 assertions**.
 
-**Result: 19/19 assertions pass** (built and run with the .NET 9 SDK).
+**Result: 26/26 assertions pass** (built and run with the .NET 9 SDK).
 
 ### Remaining manual checks (require David's machine: desktop OneNote + Word)
 1. **Full build** of the COM-linked project with Visual Studio / .NET-Framework MSBuild

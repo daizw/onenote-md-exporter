@@ -27,5 +27,12 @@ namespace alxnbl.OneNoteMdExporter.Models
         /// Number of pages skipped because they were unchanged since the last incremental export.
         /// </summary>
         public int PagesSkipped { get; set; } = 0;
+
+        /// <summary>
+        /// Number of image references in the exported markdown whose target file is missing on disk
+        /// (a broken image). Surfaced so silent image loss - a known OneNote-sync failure mode -
+        /// produces an observable signal instead of a quietly broken export.
+        /// </summary>
+        public int BrokenImageCount { get; set; } = 0;
     }
 }

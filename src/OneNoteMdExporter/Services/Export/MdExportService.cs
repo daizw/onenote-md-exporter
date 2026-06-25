@@ -123,6 +123,11 @@ namespace alxnbl.OneNoteMdExporter.Services.Export
             if (AppSettings.IncrementalExport)
                 Log.Information($"Incremental: {result.PagesSkipped} page(s) skipped, {allPages.Count - result.PagesSkipped} processed, {result.PagesOnError} error(s).");
 
+            // Surface broken-image diagnostics collected while exporting the pages.
+            result.BrokenImageCount = BrokenImagesInNotebook;
+            if (result.BrokenImageCount > 0)
+                Log.Warning($"{result.BrokenImageCount} broken image reference(s) detected across the export - the referenced files are missing on disk. Try enabling 'Download all files and images' in OneNote sync options, then re-export.");
+
             return result;
         }
 
