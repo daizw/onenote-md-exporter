@@ -1,7 +1,8 @@
 # OneNote-Md-Exporter — Incremental Export & Conversion-Quality Improvements
 
 This branch adds four improvements to `alxnbl/onenote-md-exporter`, all driven through
-the existing CLI with no change to the default behaviour:
+the existing CLI with no change to the default behaviour, plus two cherry-picked upstream
+correctness fixes (§5) and a note on math/equation export (§6):
 
 1. **Incremental export** (`--incremental`) — skip pages unchanged in OneNote since the
    last run, and resume an interrupted export instead of restarting from scratch.
@@ -100,12 +101,27 @@ Images nested inside an HTML table cell still use a raw `<img src="..." alt="" /
 cannot place a `![]()` reference inside a `<td>`), now also with an empty alt.
 
 ### Why not use the real OneNote alt text?
-OneNote's XML does carry image descriptions, but by the time images are matched here they
-have already passed through Pandoc, which renames every image to a fresh temp GUID. There
-is no reliable key to join a Pandoc temp image back to its originating `<one:Image>`
-element, so recovering the real description would be high-effort and fragile. An empty alt
-is the correct, honest, low-risk fix. (Plumbing true alt text end-to-end is left as a
-possible future enhancement.)
+OneNote's page XML *does* carry a real image description — `<one:Image>` has an `alt`
+attribute (OneNote 2013 schema). The problem is the export pipeline severs that attribute
+from the image's identity before the two ever meet:
+
+1. The page XML (with `alt`) is fetched first (`GetPageContent`).
+2. The page is then **re-rendered to DocX** by OneNote (`Publish(..., pfWord)`). This render
+   does **not** propagate the OneNote `alt` into the Word drawing's description
+   (`wp:docPr/@descr`), and emits no OneNote object id or original path into the Word XML.
+3. Pandoc converts that DocX to Markdown, extracting each image to a temp file. Because the
+   DocX had no description, the emitted reference has no alt either — and the only handle is
+   a content-hashed temp path.
+4. Images are matched back **by that Pandoc temp path** (`processImgTag`); the `<one:Image>`
+   XML node is never parsed (the XML attachment pass reads only `InsertedFile`/`MediaFile`).
+
+So there is **no stable key** linking an XML `<one:Image>` to its DocX/Pandoc counterpart.
+Recovering the real `alt` would require positionally zipping "XML image N ↔ DocX image N" by
+relying on OneNote's internal image ordering — which desyncs on merged-cell tables, floating
+images, and background images, producing **mislabelled** alt text. A wrong description read
+aloud by a screen reader is worse than none, so the honest fix is an **empty** alt. (A robust
+implementation would need OneNote to emit the description into the DocX, or a documented
+object-id join key; neither exists today.)
 
 ### Files
 | File | Change |
@@ -219,6 +235,64 @@ interop), but each is a minimal, upstream-reviewed change applied verbatim. They
 
 ---
 
+## 6. Math / equations — already handled by Pandoc (no code, verification-gated)
+
+### The question
+OneNote pages can contain equations. Does the export carry them as editable LaTeX
+(`$...$` / `$$...$$`), or are they lost / rasterised?
+
+### What the pipeline already does
+**No new code is needed for the common case** — the existing `OneNote → DocX → Pandoc → MD`
+pipeline converts math for free, *provided the equation was authored as structured math*:
+
+1. OneNote stores typed/Ink-to-Math equations as **OMML** (Office Math Markup), and a
+   `Publish(..., pfWord)` carries that OMML into the Word `.docx` as editable math (not a picture).
+2. Pandoc's DocX reader **natively parses OMML into its internal math AST**, and the Markdown/GFM
+   writer emits it as TeX between `$` (inline) / `$$` (display) delimiters **by default**. No
+   `--mathjax` / `--webtex` flag is required — those are HTML-writer options; the Markdown writer
+   always uses raw `$` delimiters. The current Pandoc invocation (`--to=gfm --wrap=none
+   --extract-media`) therefore already produces `$...$` for any OMML it receives.
+
+So for equations authored with the OneNote equation editor (or Ink-to-Math), LaTeX output is
+expected to *already work* on the current branch with zero changes.
+
+### Why no `$`-escaping guard was added
+A naive worry is that prose containing literal dollar amounts (`$20,000`) collides with math
+delimiters. Two reasons this is left alone:
+
+- **Pandoc already excludes it.** Pandoc's TeX-math rule does not open math when a `$` is followed
+  by whitespace, and does not treat `$20,000` … `$30,000` as a math span (a closing `$` immediately
+  before a digit is rejected). The upstream issue raised about this (#113) was closed by the owner
+  as *not reproducible* on v1.6.
+- **The post-processing passes don't touch `$` blocks.** I traced every transform in
+  `PageMdPostConversion`: `DeduplicateLinebreaks` / `MaxTwoLineBreaksInARow` only collapse **3+**
+  consecutive newlines (a normal `$$…$$` block uses single newlines, so it is untouched), and
+  `RemoveQuotationBlocks` only rewrites lines beginning with `>` (math lines don't). None of them
+  can corrupt a Pandoc-emitted `$$` block.
+
+Adding a speculative guard would be a fix for a failure mode that doesn't reproduce — KISS says
+don't write it.
+
+### The one unverifiable-here fact (needs David's machine)
+Everything above about Pandoc and the post-processing is verifiable statically and holds. The
+**single** thing that cannot be confirmed in this headless environment is whether OneNote's
+`Publish(pfWord)` on a *live* page actually emits OMML versus rasterising the equation to a PNG —
+that depends on desktop OneNote + COM, which aren't available here. That distinction decides
+between two honest outcomes:
+
+- **OMML survives** → equations export as `$...$` LaTeX automatically; document it as a supported
+  feature.
+- **OneNote rasterises** → equations come out as images (no LaTeX recoverable); document that
+  limitation plainly. **Do not fake LaTeX** by OCR-ing the picture.
+
+This is recorded as a one-step smoke test below; no math claim is finalised until that test runs.
+
+### Files
+*No source change.* Math is an emergent property of the existing Pandoc step; this section exists
+to document the behaviour and the single open verification.
+
+---
+
 ## Verification
 
 The full project requires desktop OneNote + Word via COM interop and builds only with
@@ -245,3 +319,8 @@ COM dependency**, so their logic was extracted into a standalone harness and uni
    that page re-exported), and a mid-run interruption + re-run (expect resume).
 3. **Visual spot-check** of a page with images and a merged-cell table in a GFM viewer
    (GitHub / Obsidian).
+4. **Math export check (§6):** create a OneNote page with one equation typed via the equation
+   editor (e.g. `E = mc^2` or a fraction), export it, and inspect the `.md`. Expected: a `$...$`
+   or `$$...$$` LaTeX span. If instead an image (`![](_resources/….png)`) appears, OneNote
+   rasterised the equation — update §6 to record math as image-only (no LaTeX), and do **not**
+   attempt OCR-to-LaTeX.
