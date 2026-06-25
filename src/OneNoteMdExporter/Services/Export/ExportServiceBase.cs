@@ -24,6 +24,12 @@ namespace alxnbl.OneNoteMdExporter.Services.Export
     {
         protected abstract string ExportFormatCode { get; }
 
+        /// <summary>
+        /// Incremental export manifest for the notebook currently being exported.
+        /// Null when incremental export is disabled.
+        /// </summary>
+        protected IncrementalManifest Manifest { get; private set; }
+
         protected static string GetNotebookFolderPath(Notebook notebook)
             => Path.Combine(notebook.ExportFolder, notebook.GetNotebookPath());
 
@@ -50,8 +56,23 @@ namespace alxnbl.OneNoteMdExporter.Services.Export
 
         public NotebookExportResult ExportNotebook(Notebook notebook, string sectionNameFilter = "", string pageNameFilter = "")
         {
-            notebook.ExportFolder = @$"{Localizer.GetString("ExportFolder")}\{ExportFormatCode}\{notebook.GetNotebookPath()}-{DateTime.Now:yyyyMMdd HH-mm}";
-            CleanUpFolder(notebook);
+            if (AppSettings.IncrementalExport)
+            {
+                // Stable folder (no timestamp) so successive runs converge on the same output.
+                notebook.ExportFolder = @$"{Localizer.GetString("ExportFolder")}\{ExportFormatCode}\{notebook.GetNotebookPath()}";
+
+                // Do NOT wipe the export folder: incremental relies on previously-exported files
+                // staying in place. Only clear the temp scratch folder.
+                DirectoryHelper.ClearFolder(GetTmpFolder(notebook));
+
+                Manifest = IncrementalManifest.LoadOrCreate(GetNotebookFolderPath(notebook), notebook.OneNoteId);
+            }
+            else
+            {
+                notebook.ExportFolder = @$"{Localizer.GetString("ExportFolder")}\{ExportFormatCode}\{notebook.GetNotebookPath()}-{DateTime.Now:yyyyMMdd HH-mm}";
+                CleanUpFolder(notebook);
+                Manifest = null;
+            }
 
             // Initialize hierarchy of the notebook from OneNote APIs
             try
@@ -238,6 +259,43 @@ namespace alxnbl.OneNoteMdExporter.Services.Export
         }
 
         protected abstract string GetPageWikilink(string linkText, string mdFilePath, string pageId);
+
+        /// <summary>
+        /// Incremental: true when this page can be skipped because it is unchanged in OneNote
+        /// since the last successful export and its previously generated .md file is still present.
+        /// Always false when incremental export is disabled.
+        /// </summary>
+        protected bool CanSkipPage(Page page)
+        {
+            if (Manifest == null)
+                return false;
+
+            return Manifest.CanSkip(page, GetPageMdFilePath(page));
+        }
+
+        /// <summary>
+        /// Incremental: record the outcome of a page export in the manifest and persist it
+        /// immediately, so an interrupted batch keeps the progress it has already made.
+        /// No-op when incremental export is disabled.
+        /// </summary>
+        protected void RecordPageExport(Page page, bool success)
+        {
+            if (Manifest == null)
+                return;
+
+            string relativePath;
+            try
+            {
+                relativePath = Path.GetRelativePath(GetNotebookFolderPath(page.GetNotebook()), GetPageMdFilePath(page));
+            }
+            catch
+            {
+                relativePath = GetPageMdFilePath(page);
+            }
+
+            Manifest.RecordPage(page, relativePath, success);
+            Manifest.Save();
+        }
 
         /// <summary>
         /// Pre-process OneNote XML page for: Sections unfold, Convert OneNote tags to #hash-tags, Keep checkboxes, etc.
@@ -618,12 +676,17 @@ namespace alxnbl.OneNoteMdExporter.Services.Export
                 }
 
                 var attachRef = GetAttachmentMdReference(imgAttach);
-                var refLabel = Path.GetFileNameWithoutExtension(imgAttach.ActualSourceFilePath);
 
+                // Alt text deliberately left empty: the only label available here is the
+                // PanDoc/OneNote-cache file name, which is an opaque GUID (e.g. "a3f9c2e1bd...").
+                // Emitting that as alt text is worse than no alt text - it shows as gibberish on a
+                // broken image and is read aloud verbatim by screen readers (Least-Astonishment).
+                // An empty alt yields a clean "![](path)" that renders identically and degrades gracefully.
                 if (outputHtmlTag)
-                    return $"<img src=\"{attachRef}\" alt=\"{refLabel}\" />";
+                    // Inside an HTML table cell GFM cannot use "![]()", so keep a raw <img>.
+                    return $"<img src=\"{attachRef}\" alt=\"\" />";
                 else
-                    return $"![{refLabel}]({attachRef})";
+                    return $"![]({attachRef})";
             }
 
             // Match <IMG> tags and any html cell tags arround

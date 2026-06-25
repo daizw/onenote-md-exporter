@@ -105,10 +105,23 @@ namespace alxnbl.OneNoteMdExporter.Services.Export
             foreach (Page page in allPages)
             {
                 Log.Information($"- {Localizer.GetString("Page")} {++cmptPage}/{allPages.Count} : {page.Parent.Title} / {page.TitleWithPageLevelTabulation}");
+
+                if (CanSkipPage(page))
+                {
+                    Log.Information($"  -> skipped (unchanged since last export)");
+                    result.PagesSkipped++;
+                    continue;
+                }
+
                 var success = ExportPage(page);
 
                 if (!success) result.PagesOnError++;
+
+                RecordPageExport(page, success);
             }
+
+            if (AppSettings.IncrementalExport)
+                Log.Information($"Incremental: {result.PagesSkipped} page(s) skipped, {allPages.Count - result.PagesSkipped} processed, {result.PagesOnError} error(s).");
 
             return result;
         }

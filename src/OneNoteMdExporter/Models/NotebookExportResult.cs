@@ -22,5 +22,10 @@ namespace alxnbl.OneNoteMdExporter.Models
         /// Number of pages that fail to be exported
         /// </summary>
         public int PagesOnError { get; set; } = 0;
+
+        /// <summary>
+        /// Number of pages skipped because they were unchanged since the last incremental export.
+        /// </summary>
+        public int PagesSkipped { get; set; } = 0;
     }
 }

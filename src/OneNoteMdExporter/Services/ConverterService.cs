@@ -123,6 +123,44 @@ namespace alxnbl.OneNoteMdExporter.Services
             mdFileContent = InsertMdHighlight(mdFileContent);
 
             mdFileContent = InsertMdTodoMarks(mdFileContent);
+
+            // Complex OneNote tables (merged cells / block content in cells) cannot be expressed as
+            // GFM pipe tables, so Pandoc emits them as a raw HTML <table> block. Strict GFM/CommonMark
+            // renderers (GitHub, Obsidian) only treat such a block as HTML when it is set off by blank
+            // lines; otherwise it gets absorbed into an adjacent paragraph and renders as literal markup.
+            // This normalization only guarantees the blank-line separation - it never parses or rewrites
+            // cell content, so it cannot lose colspan/rowspan or nested-content information.
+            mdFileContent = NormalizeHtmlTableBlocks(mdFileContent);
+        }
+
+        /// <summary>
+        /// Ensure each raw HTML &lt;table&gt;...&lt;/table&gt; block produced by Pandoc (the fallback for
+        /// complex/merged-cell tables that GFM pipe tables cannot represent) is surrounded by blank lines,
+        /// so it is recognised as an HTML block by strict GFM/CommonMark renderers. Content-preserving:
+        /// the table markup itself is left untouched.
+        /// </summary>
+        private static string NormalizeHtmlTableBlocks(string pageTxt)
+        {
+            var nl = Environment.NewLine;
+
+            // Guarantee a blank line before each opening <table ...> ...
+            pageTxt = Regex.Replace(
+                pageTxt,
+                @"(?<!\n[ \t]*\n)[ \t]*(?<tag><table\b[^>]*>)",
+                nl + nl + "${tag}",
+                RegexOptions.IgnoreCase);
+
+            // ... and a blank line after each closing </table>.
+            pageTxt = Regex.Replace(
+                pageTxt,
+                @"(?<tag></table>)[ \t]*(?!\n[ \t]*\n)",
+                "${tag}" + nl + nl,
+                RegexOptions.IgnoreCase);
+
+            // Collapse any runs of 3+ newlines we may have just introduced back down to a single blank line.
+            pageTxt = Regex.Replace(pageTxt, @"(\r?\n){3,}", nl + nl);
+
+            return pageTxt;
         }
 
         private static string InsertMdTodoMarks(string mdFileContent)

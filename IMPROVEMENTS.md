@@ -1,0 +1,174 @@
+# OneNote-Md-Exporter — Incremental Export & Conversion-Quality Improvements
+
+This branch adds three improvements to `alxnbl/onenote-md-exporter`, all driven through
+the existing CLI with no change to the default behaviour:
+
+1. **Incremental export** (`--incremental`) — skip pages unchanged in OneNote since the
+   last run, and resume an interrupted export instead of restarting from scratch.
+2. **Cleaner image references** — stop emitting the opaque cache GUID as image alt text.
+3. **Complex-table rendering fix** — guarantee raw HTML tables are recognised as HTML
+   blocks by strict GFM/CommonMark renderers (GitHub, Obsidian).
+
+All three are opt-in-safe: the default (no `--incremental`) export is unchanged except for
+the two rendering-quality fixes, which only make output cleaner.
+
+---
+
+## 1. Incremental export — `--incremental`
+
+### Problem
+A full notebook export re-converts **every** page every run and writes to a new
+timestamped folder. For large notebooks this is slow, and if a batch run fails partway
+through, the whole export has to start again.
+
+### What changed
+A new `--incremental` flag changes three things:
+
+- **Stable output folder.** Output goes to `md/<notebook>` (no timestamp suffix), so
+  successive runs write to the same place.
+- **A manifest** (`onenote-export-manifest.json`) is written at the root of that folder.
+  It records, per page (keyed by the stable OneNote page id), the OneNote
+  *last-modified* time, the relative output path, and the last export status.
+- **Skip + resume.** A page is skipped when **all** of these hold:
+  - it is present in the manifest with status `ok`,
+  - its OneNote last-modified time is unchanged (±1s tolerance for serialisation drift),
+  - its output `.md` file still exists on disk.
+
+  The manifest is saved after **each** page, so a crash mid-run leaves a valid manifest and
+  the next run resumes from where it stopped. The export folder is **not** wiped at the
+  start of an incremental run.
+
+When `--incremental` is **not** supplied, behaviour is exactly as before (timestamped
+folder, full re-export, folder cleaned at start).
+
+### How to use
+```bash
+# First run — full export into a stable folder, writes the manifest
+OneNoteMdExporter.exe --notebook "My Notebook" --format 1 --incremental --no-input
+
+# Later runs — only pages changed in OneNote since last time are re-converted
+OneNoteMdExporter.exe --notebook "My Notebook" --format 1 --incremental --no-input
+```
+
+Typical second-run log:
+```
+Incremental: 142 page(s) skipped, 6 processed, 0 error(s).
+```
+
+### Design notes
+- The skip key is the OneNote page id (a stable GUID), **not** the title or path, so renames
+  and re-orderings don't cause spurious re-exports or stale duplicates.
+- The manifest loader **never throws**: a corrupt or schema-mismatched manifest, or one
+  belonging to a different notebook, is discarded and treated as an empty manifest (a full
+  export), with a warning. Failing safe here means a bad manifest can never block an export.
+- Atomic save (temp file + move) so an interrupted write can't corrupt the manifest.
+
+### Files
+| File | Change |
+|---|---|
+| `Services/Export/IncrementalManifest.cs` | **New.** Manifest model + load/skip/record/save logic. |
+| `Infrastructure/AppSettings.cs` | New `IncrementalExport` setting. |
+| `Program.cs` | New `--incremental` CLI option, wired to the setting. |
+| `Services/Export/ExportServiceBase.cs` | Stable-folder selection, manifest lifecycle, `CanSkipPage` / `RecordPageExport` helpers. |
+| `Services/Export/MdExportService.cs` | Phase-2 loop skips unchanged pages and records each result. |
+| `Models/NotebookExportResult.cs` | New `PagesSkipped` counter. |
+
+---
+
+## 2. Image references — drop the GUID alt text
+
+### Problem
+Images were emitted with the OneNote-cache / PanDoc temp **file name** as alt text — an
+opaque GUID, e.g.:
+```markdown
+![a3f9c2e1bd6f4a0e9c1d](_resources/a3f9c2e1bd6f4a0e9c1d.png)
+```
+That GUID is meaningless: it shows as gibberish when an image fails to load and is read
+aloud verbatim by screen readers — worse than no alt text at all.
+
+### What changed
+Images now use an **empty** alt text, yielding a clean reference that renders identically
+and degrades gracefully:
+```markdown
+![](_resources/a3f9c2e1bd6f4a0e9c1d.png)
+```
+Images nested inside an HTML table cell still use a raw `<img src="..." alt="" />` (GFM
+cannot place a `![]()` reference inside a `<td>`), now also with an empty alt.
+
+### Why not use the real OneNote alt text?
+OneNote's XML does carry image descriptions, but by the time images are matched here they
+have already passed through Pandoc, which renames every image to a fresh temp GUID. There
+is no reliable key to join a Pandoc temp image back to its originating `<one:Image>`
+element, so recovering the real description would be high-effort and fragile. An empty alt
+is the correct, honest, low-risk fix. (Plumbing true alt text end-to-end is left as a
+possible future enhancement.)
+
+### Files
+| File | Change |
+|---|---|
+| `Services/Export/ExportServiceBase.cs` | `processImgTag` emits empty alt instead of the cache GUID, for both the `![]()` and the table-cell `<img>` paths. |
+
+---
+
+## 3. Complex tables — make the HTML fallback render correctly
+
+### Problem
+GFM pipe tables cannot represent merged cells (`colspan`/`rowspan`) or block content inside
+cells. For such tables Pandoc correctly falls back to a raw HTML `<table>` block. But that
+block was emitted **without** the blank-line separation that strict GFM/CommonMark
+renderers (GitHub, Obsidian) require — so the table got absorbed into the adjacent
+paragraph and rendered as literal `<table>...` markup.
+
+### What changed
+A new content-preserving post-processing pass, `NormalizeHtmlTableBlocks`, guarantees a
+blank line **before** every `<table ...>` and **after** every `</table>`, then collapses any
+accidental 3+ newline runs back to a single blank line.
+
+It only adjusts whitespace **around** the table block — it never parses or rewrites the
+table markup, so `colspan` / `rowspan` and nested cell content are preserved exactly.
+Simple tables are unaffected (Pandoc already emits them as clean GFM pipe tables;
+`--to=gfm` is the existing default).
+
+Before (absorbed into the paragraph, renders as literal markup):
+```markdown
+Some lead-in text.<table><tr><td colspan="2">merged</td></tr></table>Trailing text.
+```
+After (recognised as an HTML block, renders as a real table):
+```markdown
+Some lead-in text.
+
+<table><tr><td colspan="2">merged</td></tr></table>
+
+Trailing text.
+```
+
+### Files
+| File | Change |
+|---|---|
+| `Services/ConverterService.cs` | New `NormalizeHtmlTableBlocks`, called at the end of `PageMdPostConversion`. |
+
+---
+
+## Verification
+
+The full project requires desktop OneNote + Word via COM interop and builds only with
+.NET-Framework MSBuild, so it can't be compiled or end-to-end tested in a headless
+environment. The three changes above are, however, **pure string/data transforms with no
+COM dependency**, so their logic was extracted into a standalone harness and unit-tested:
+
+- Incremental manifest: skip/record/persist/reload, sub-second-drift tolerance,
+  error-status retry, stale-notebook rejection, corrupt-manifest safety — **10 assertions**.
+- Image alt-text emission (table and non-table paths) — **3 assertions**.
+- HTML table normalization: blank-line insertion both sides, content/`colspan`/`rowspan`
+  preservation, idempotency, no-op when no table — **6 assertions**.
+
+**Result: 19/19 assertions pass** (built and run with the .NET 9 SDK).
+
+### Remaining manual checks (require David's machine: desktop OneNote + Word)
+1. **Full build** of the COM-linked project with Visual Studio / .NET-Framework MSBuild
+   (`net10.0-windows7.0`, win-x86).
+2. **Live incremental smoke test:** run with `--incremental` once (full export), run again
+   unchanged (expect all pages skipped), edit one page in OneNote, run again (expect exactly
+   that page re-exported), and a mid-run interruption + re-run (expect resume).
+3. **Visual spot-check** of a page with images and a merged-cell table in a GFM viewer
+   (GitHub / Obsidian).

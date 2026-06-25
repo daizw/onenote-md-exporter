@@ -67,7 +67,19 @@ namespace alxnbl.OneNoteMdExporter.Infrastructure
         /// OneNote indentation handling
         /// </summary>
         public static IndentingStyleEnum IndentingStyle { get; set; } = IndentingStyleEnum.ConvertToBullets;
-        
+
+        /// <summary>
+        /// Incremental export. When true:
+        /// - the notebook is exported into a stable folder (no timestamp suffix) so successive runs
+        ///   write to the same place,
+        /// - a manifest (onenote-export-manifest.json) tracks each page's OneNote last-modified time,
+        /// - pages unchanged in OneNote since the last successful export are skipped,
+        /// - the export folder is NOT wiped at the start of the run.
+        /// Set via the --incremental CLI flag. Default false preserves the original timestamped,
+        /// full-export behaviour.
+        /// </summary>
+        public static bool IncrementalExport { get; set; } = false;
+
 
         /*
          * Markdown rendering Settings

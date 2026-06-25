@@ -43,6 +43,9 @@ namespace alxnbl.OneNoteMdExporter
 
             [Option("ignore-errors", Required = false, HelpText = "Export all notebook event in case of error")]
             public bool IgnoreErrors { get; set; }
+
+            [Option("incremental", Required = false, HelpText = "Incremental export: write to a stable folder and skip pages unchanged in OneNote since the last run (uses onenote-export-manifest.json). Resumes interrupted exports instead of restarting from scratch.")]
+            public bool Incremental { get; set; }
         }
 
         public static void Main(params string[] args)
@@ -67,6 +70,7 @@ namespace alxnbl.OneNoteMdExporter
         {
             AppSettings.LoadAppSettings();
             AppSettings.Debug = opts.Debug;
+            AppSettings.IncrementalExport = opts.Incremental;
 
             Log.Debug("Debug mode: {DebugMode}", AppSettings.Debug);
             InitLogger();
