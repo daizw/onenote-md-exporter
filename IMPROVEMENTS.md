@@ -200,6 +200,25 @@ turns a silent data-loss path into an observable signal (fail-loudly, not silent
 
 ---
 
+## 5. Adopted upstream correctness fixes (cherry-picked, original authorship preserved)
+
+Two small, single-purpose bug-fixes were open as upstream PRs against `alxnbl/onenote-md-exporter`
+but unmerged (upstream `main` has not moved since 2025-12-15). Both are pure correctness fixes with
+no behavioural surprise, so they were cherry-picked onto this branch with `git cherry-pick -x`
+(provenance trailer retained) and their **original authors preserved** — only the committer is the
+fork owner.
+
+| # | Upstream PR | Author | File | Fix |
+|---|---|---|---|---|
+| 5a | [#142](https://github.com/alxnbl/onenote-md-exporter/pull/142) | Nic Jansma | `Services/Export/ExportServiceBase.cs` | `ConvertOnenoteTags` called `.First()` on a `<one:Tag>` whose parent had no `<one:T>` text element, throwing a LINQ "sequence contains no elements" exception and aborting the page. Now guarded: a tag with no associated text element is skipped. (Fail-loudly-compatible: it degrades one orphan tag instead of crashing the export.) |
+| 5b | [#110](https://github.com/alxnbl/onenote-md-exporter/pull/110) | Rob Bernstein | `Helpers/OneNoteExtensions.cs` | The OneNote COM API mis-encodes certain characters in section-title XML, returning the literal two-char strings `^M` for `+` and `^J` for `,`. `FillNodebookSections` now restores them, so section/folder names with `+` or `,` export correctly instead of as `^M` / `^J`. |
+
+Neither fix is exercised by the COM-free harness (both sit on XML/LINQ paths that need OneNote
+interop), but each is a minimal, upstream-reviewed change applied verbatim. They are kept as
+**separate commits** from the original work so they can be dropped or re-based independently.
+
+---
+
 ## Verification
 
 The full project requires desktop OneNote + Word via COM interop and builds only with
