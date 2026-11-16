@@ -4,6 +4,9 @@ This branch adds four improvements to `alxnbl/onenote-md-exporter`, all driven t
 the existing CLI with no change to the default behaviour, plus two cherry-picked upstream
 correctness fixes (§5) and a note on math/equation export (§6):
 
+Version 1.7.1 also fixes cloning unread shared-notebook pages into the local
+temporary export notebook (see §7).
+
 1. **Incremental export** (`--incremental`) — skip pages unchanged in OneNote since the
    last run, and resume an interrupted export instead of restarting from scratch.
 2. **Cleaner image references** — stop emitting the opaque cache GUID as image alt text.
@@ -292,6 +295,23 @@ This is recorded as a one-step smoke test below; no math claim is finalised unti
 to document the behaviour and the single open verification.
 
 ---
+
+## 7. Preserve source read state when cloning pages
+
+Shared notebooks can return page XML containing `isUnread=true`. Copying that
+attribute into a local temporary notebook fails with `0x8004202B`
+(`hrUnreadDisabledForNotebook`), because the destination does not support
+unread tracking. The page then fails to export even though its content is
+readable.
+
+`TemporaryNotebook.ClonePage` now removes `isUnread` from the in-memory clone
+before `UpdatePageContent`. It does not update the source page or mark it read.
+The fix applies to both full and incremental exports and leaves manifest
+schema and command-line behaviour unchanged.
+
+Validation on Windows reproduced the original failure, successfully exported
+the same nonempty page after the fix, verified the original page remained
+unread, and verified a second incremental run skipped the unchanged page.
 
 ## Verification
 
