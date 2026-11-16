@@ -62,6 +62,8 @@ namespace alxnbl.OneNoteMdExporter.Models
 
             // Update the XML as it still points to the page to clone
             xmlPageContent.Attribute("ID").Value = tempPageId;
+            // Local scratch notebooks reject read-tracking state from shared notebooks.
+            xmlPageContent.Attribute("isUnread")?.Remove();
 
             // Replace created temp page with our page content
             oneNoteApp.UpdatePageContent(xmlPageContent.ToString(SaveOptions.DisableFormatting));
